@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,6 +46,8 @@ import (
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/trace"
 )
+
+var typeCounts = &sync.Map{}
 
 const defaultExpectedTypeName = "<unspecified>"
 
@@ -206,6 +209,8 @@ type ReflectorOptions struct {
 // everything as well as incrementally processing the things that
 // change.
 func NewReflectorWithOptions(lw ListerWatcher, expectedType interface{}, store Store, options ReflectorOptions) *Reflector {
+	klog.V(0).Infof("NewReflectorWithOptions called for %T %v with store type %T at %[3]p", expectedType, options.Name, store)
+
 	reflectorClock := options.Clock
 	if reflectorClock == nil {
 		reflectorClock = clock.RealClock{}
@@ -286,13 +291,18 @@ var internalPackages = []string{"client-go/tools/cache/"}
 // objects and subsequent deltas.
 // Run will exit when stopCh is closed.
 func (r *Reflector) Run(stopCh <-chan struct{}) {
-	klog.V(3).Infof("Starting reflector %s (%s) from %s", r.typeDescription, r.resyncPeriod, r.name)
+	klog.V(0).Infof("Starting reflector %s (%s) from %s", r.typeDescription, r.resyncPeriod, r.name)
+	startCount := updateCounter(r, 1)
+	klog.V(0).Infof("Reflector Run count for %v = %v", r.typeDescription, startCount)
+
 	wait.BackoffUntil(func() {
 		if err := r.ListAndWatch(stopCh); err != nil {
 			r.watchErrorHandler(r, err)
 		}
 	}, r.backoffManager, true, stopCh)
-	klog.V(3).Infof("Stopping reflector %s (%s) from %s", r.typeDescription, r.resyncPeriod, r.name)
+	klog.V(0).Infof("Stopping reflector %s (%s) from %s", r.typeDescription, r.resyncPeriod, r.name)
+	stoppedCount := updateCounter(r, -1)
+	klog.V(0).Infof("Reflector Stopped count for %v = %v", r.typeDescription, stoppedCount)
 }
 
 var (
@@ -322,7 +332,8 @@ func (r *Reflector) resyncChan() (<-chan time.Time, func() bool) {
 // and then use the resource version to watch.
 // It returns error if ListAndWatch didn't even try to initialize watch.
 func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
-	klog.V(3).Infof("Listing and watching %v from %s", r.typeDescription, r.name)
+	klog.V(0).Infof("Listing and watching %v from %s", r.typeDescription, r.name)
+
 	var err error
 	var w watch.Interface
 	fallbackToList := !r.UseWatchList
@@ -899,4 +910,10 @@ func isWatchErrorRetriable(err error) bool {
 		return true
 	}
 	return false
+}
+
+func updateCounter(r *Reflector, delta int64) int64 {
+	val, _ := typeCounts.LoadOrStore(r.typeDescription, new(int64))
+	ptr := val.(*int64)
+	return atomic.AddInt64(ptr, delta)
 }
